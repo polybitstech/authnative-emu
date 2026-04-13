@@ -22,5 +22,8 @@ int main() {
     const uint32_t ret = fn();
     std::cout << "ret: " << ret << std::endl;
 
+    // Wait until input
+    std::cin.get();
+
     return 0;
 }

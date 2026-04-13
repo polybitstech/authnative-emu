@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
 project(authnative_emu LANGUAGES CXX)
 
+if (NOT MSVC)
+    message(FATAL_ERROR "This project must be built with MSVC.")
+endif()
+
 add_library(authnative_emu SHARED
         include/authnative/constants.h
         include/authnative/crypto.h
@@ -14,10 +18,11 @@ target_include_directories(authnative_emu PUBLIC
 
 target_link_libraries(authnative_emu PRIVATE
         bcrypt
+        wbemuuid
+        comsuppw
 )
 
 target_compile_features(authnative_emu PUBLIC cxx_std_20)
-set_target_properties(authnative_emu PROPERTIES PREFIX "")
 
 add_executable(authnative_emu_test
         src/main.cpp
