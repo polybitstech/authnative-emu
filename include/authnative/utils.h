@@ -57,6 +57,18 @@ bytes to_le_bytes(T value)
     return out;
 }
 
+template <typename T>
+constexpr T from_le_bytes(const bytes& p)
+{
+    static_assert(std::is_integral_v<T>, "T must be an integral type");
+    static_assert(std::is_unsigned_v<T>, "T must be unsigned");
+
+    T v = 0;
+    for (size_t i = 0; i < sizeof(T); ++i)
+        v |= static_cast<T>(p[i]) << (i * 8);
+    return v;
+}
+
 inline std::string to_upperhex(const bytes &b) {
     static constexpr char hex[] = "0123456789ABCDEF";
 

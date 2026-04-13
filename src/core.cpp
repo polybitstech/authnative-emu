@@ -11,6 +11,8 @@
 
 #include <shlobj.h>
 
+#include "nlohmann/json.hpp"
+
 #include "authnative/constants.h"
 #include "authnative/crypto.h"
 #include "authnative/utils.h"
@@ -21,7 +23,9 @@ struct AuthContext;
 
 class FDWorker {
 public:
-    explicit FDWorker(AuthContext* ctx) : _ctx(ctx) {}
+    explicit FDWorker(AuthContext *ctx) : _ctx(ctx) {
+    }
+
     ~FDWorker() {
         stop(); // For safety..
     }
@@ -39,9 +43,9 @@ public:
     }
 
 private:
-    void fn(AuthContext* ctx) const;
+    void fn(AuthContext *ctx) const;
 
-    AuthContext* _ctx;
+    AuthContext *_ctx;
     std::atomic<bool> _stop_requested{false};
     std::thread _thread;
 };
@@ -52,6 +56,7 @@ struct AuthContext {
 
     // vector because ordering is important.
     std::vector<std::pair<std::string, bytes> > dll_map;
+    std::vector<std::pair<bytes, bytes> > dll_map_enc;
     bytes dll_total_hash;
 
     std::map<uint32_t, bytes> hwid_artifacts;
@@ -106,7 +111,11 @@ bool init_dll_map(AuthContext *ctx) {
             if (!std::filesystem::exists(file)) {
                 return false;
             }
-            ctx->dll_map.emplace_back(dll_name, md5(get_file_contents(file)));
+
+            auto hash = md5(get_file_contents(file));
+            ctx->dll_map.emplace_back(dll_name, hash);
+            ctx->dll_map_enc.emplace_back(F_encrypt(to_bytes(dll_name)), F_encrypt(hash));
+
             return true;
         });
     if (!ok)
@@ -228,7 +237,6 @@ void FDWorker::fn(AuthContext *ctx) const {
             std::lock_guard lock(ctx->fd_mutex);
             // Assume we don't AFK 200 minutes in the game
             if (ctx->fd_buf_off + 10 <= ctx->fd_buf.size()) {
-
                 for (size_t i = 0; i < 10; i++) {
                     const uint8_t g = ctx->fd_buf[i + ctx->fd_buf_off];
                     const uint8_t k = an_consts::fd_key[i];
@@ -239,24 +247,19 @@ void FDWorker::fn(AuthContext *ctx) const {
                     const uint8_t v2 = rol8(ctx->fd_sbox[neg_k ^ g ^ ctx->fd_lbox[p[0]]], p[2]);
                     ctx->fd_buf[i + ctx->fd_buf_off] = v1 ^ v2;
 
-                    const uint8_t pnew_0 = ctx->fd_lbox[p[0]] - k;
-                    const uint8_t pnew_8 = ctx->fd_sbox[p[1]] + k;
-                    const uint8_t pnew_16 = ctx->fd_sbox[p[3]] ^ neg_k;
-                    const uint8_t pnew_24 = ctx->fd_lbox[p[2]] ^ neg_k;
+                    bytes p_new_b(4);
+                    p_new_b[0] = ctx->fd_lbox[p[0]] - k;
+                    p_new_b[1] = ctx->fd_sbox[p[1]] + k;
+                    p_new_b[2] = ctx->fd_sbox[p[3]] ^ neg_k;
+                    p_new_b[3] = ctx->fd_lbox[p[2]] ^ neg_k;
 
-                    uint32_t pnew =
-                        static_cast<uint32_t>(pnew_0) |
-                        (static_cast<uint32_t>(pnew_8)  << 8) |
-                        (static_cast<uint32_t>(pnew_16) << 16) |
-                        (static_cast<uint32_t>(pnew_24) << 24);
+                    auto pnew = from_le_bytes<uint32_t>(p_new_b);
+                    pnew = rol32(pnew ^ ctx->fd_nonce, 7) + an_consts::fd_nonce_update_c;
 
-                    pnew = rol32(pnew ^ ctx->fd_nonce, 7) + an_consts::fd_nonce_upadte_c;
                     ctx->fd_nonce = pnew;
-
                 }
                 ctx->fd_buf_off += 10;
             }
-
         } else {
             continue;
         }
@@ -266,7 +269,7 @@ void FDWorker::fn(AuthContext *ctx) const {
 }
 
 void init_freedom_detection(AuthContext *ctx) {
-    refresh_fd(ctx, 0xd58c0b234f82e21);
+    refresh_fd(ctx, get_sid());
     ctx->fd_worker.start();
 }
 
@@ -318,8 +321,138 @@ extern "C" AUTHNATIVE_API uint32_t Initialize() {
     return 0;
 }
 
-extern "C" AUTHNATIVE_API void Sign(uint8_t *in_buf, uint32_t in_len, uint8_t *out_buf, uint32_t out_len) {
+bytes make_2bytes(const uint32_t key, const uint16_t input) {
+    const auto key_b = to_le_bytes<uint32_t>(key);
+    const auto g = key_b + key_b;
+
+    uint8_t cur = input >> 8, c1 = input & 0xFF, c2 = input >> 8;
+    for (size_t i = 0; i < 8; i++) {
+        const uint8_t h = g[i] ^ cur;
+        if (i % 2 == 0) {
+            c1 ^= h;
+            cur = rol8(c1, 7);
+        } else {
+            c2 ^= h;
+            cur = rol8(c2, 7);
+        }
+    }
+
+    return {c1, c2};
+}
+
+bytes make_8bytes(const uint32_t key, const uint64_t input) {
+    bytes buf(32);
+    bytes main(32);
+    const bytes input_b = to_le_bytes<uint64_t>(input);
+    const bytes key_b = to_le_bytes<uint32_t>(key);
+
+    for (size_t i = 0; i < 32; i++) {
+        uint8_t cur;
+        if (i < 4) {
+            cur = input_b[i + 4];
+        } else {
+            cur = main[i - 4];
+        }
+        const size_t cidx = (i / 4 + i % 4) & 3;
+        buf[i] = rol8(cur, 7) ^ key_b[cidx];
+        if (i < 8) {
+            main[i] = buf[i] ^ input_b[i];
+        } else {
+            main[i] = buf[i] ^ main[i - 8];
+        }
+    }
+    return {main[24], main[25], main[26], main[27], main[28], main[29], main[30], main[31]};
+}
+
+bool has_ruleset_id(const bytes &bytes) {
+    try {
+        const auto j = nlohmann::json::parse(bytes.begin(), bytes.end());
+        return j.contains("ruleset_id");
+    } catch (...) {
+        return false;
+    }
+}
+
+bytes build_inner(AuthContext *ctx, const bytes &msg) {
+    bytes payload;
+    payload += to_le_bytes<uint32_t>(an_consts::inner_magic);
+    payload += to_le_bytes<uint64_t>(get_ft_as_epoch());
+    payload += to_le_bytes<uint32_t>(static_cast<uint32_t>(ctx->dll_map.size()));
+    for (const auto &[dll_name_enc, dll_hash_enc]: ctx->dll_map_enc) {
+        payload += to_le_bytes<uint32_t>(static_cast<uint32_t>(dll_name_enc.size()));
+        payload += dll_name_enc;
+        payload += to_le_bytes<uint32_t>(static_cast<uint32_t>(dll_hash_enc.size()));
+        payload += dll_hash_enc;
+    }
+    payload += to_le_bytes<uint32_t>(static_cast<uint32_t>(ctx->hwid_artifacts.size()));
+    payload += ctx->hwid_artifacts_enc;
+    payload += ctx->hwid_artifacts_key;
+
+
+    const size_t mt_key_length = random_u32() % an_consts::inner_mt_key_l_divider + an_consts::inner_mt_key_l_adder;
+    const bytes mt_key = random_bytes(mt_key_length);
+    payload += to_le_bytes<uint32_t>(static_cast<uint32_t>(mt_key_length));
+    payload += mt_key;
+
+    // we do manual `from_le_bytes` here because mt_key is more than 4 bytes
+    const uint32_t key_first = mt_key[0] | (mt_key[1] << 8) | (mt_key[2] << 16) | (mt_key[3] << 24);
+    const uint32_t a = static_cast<uint32_t>(from_le_bytes<uint16_t>(random_bytes(2)) << 16) |
+                       an_consts::inner_a_lower4;
+
+    payload += to_le_bytes<uint32_t>(a);
+
+    const uint32_t g = a ^ key_first;
+
+    if (has_ruleset_id(msg)) {
+        {
+            std::lock_guard lock(ctx->fd_mutex);
+            payload += make_2bytes(g, 1);
+            payload += make_8bytes(g, ctx->sid);
+            payload += make_8bytes(g, reinterpret_cast<uint64_t>(ctx->fd_buf.data()));
+            payload += make_8bytes(g, reinterpret_cast<uint64_t>(ctx->fd_buf.data()) + ctx->fd_buf_off);
+            payload += ctx->fd_buf;
+        }
+        refresh_fd(ctx, get_sid());
+    } else {
+        payload += make_2bytes(g, 0);
+    }
+
+
+    auto hmac = hmac_sha1(to_bytes(an_consts::inner_hmac_key), payload + msg);
+    auto hmac_enc = F_encrypt(to_bytes(to_upperhex(hmac)));
+
+    payload += to_le_bytes<uint32_t>(static_cast<uint32_t>(hmac_enc.size()));
+    payload += hmac_enc;
+
+    return payload;
+}
+
+extern "C" AUTHNATIVE_API void Sign(uint8_t *in_buf, const uint32_t in_len, uint8_t *out_buf, const uint32_t out_len) {
+    const bytes in_bytes(in_buf, in_buf + in_len);
+    const auto inner = build_inner(a_ctx, in_bytes);
+
+    const auto gcm_key = random_bytes(16);
+    const auto gcm_iv = random_bytes(12);
+
+    const auto inner_enc = aes_gcm(gcm_key, gcm_iv, inner);
+
+    static const auto blob = make_rsa_public_blob(to_bytes(an_consts::rsa_exponent_be),
+                                                  to_bytes(an_consts::rsa_modulus_be));
+
+    const auto key_iv_enc = rsa_3072_oaep_sha1_encrypt(blob, gcm_key + gcm_iv);
+
+    const auto footer = to_upperhex(a_ctx->dll_total_hash) + to_upperhex(
+                            to_le_bytes<uint32_t>(static_cast<uint32_t>(get_ft_as_epoch() / 10'000'000)));
+    const auto footer_hmac = hmac_sha1(to_bytes(an_consts::footer_hmac_key), to_bytes(footer));
+
+    const auto completed = to_upperhex(key_iv_enc) + to_upperhex(inner_enc) + footer + to_upperhex(footer_hmac) + "01";
+
+    assert(out_len >= completed.size());
+    std::memcpy(out_buf, completed.data(), completed.size());
 }
 
 extern "C" AUTHNATIVE_API void Unload() {
+    a_ctx->fd_worker.stop();
+    delete a_ctx;
+    a_ctx = nullptr;
 }

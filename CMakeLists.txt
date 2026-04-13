@@ -9,6 +9,7 @@ add_library(authnative_emu SHARED
         include/authnative/constants.h
         include/authnative/crypto.h
         include/authnative/utils.h
+        include/nlohmann/json.hpp
         src/core.cpp
 )
 

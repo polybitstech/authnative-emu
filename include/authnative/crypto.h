@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <random>
 #include <vector>
 
 inline bytes random_bytes(const size_t n)
@@ -24,6 +25,14 @@ inline bytes random_bytes(const size_t n)
 
     return out;
 }
+
+inline uint32_t random_u32()
+{
+    static std::mt19937 rng(std::random_device{}());
+    static std::uniform_int_distribution<uint32_t> dist;
+    return dist(rng);
+}
+
 
 static constexpr std::array<uint32_t, 256> make_crc32_table()
 {
