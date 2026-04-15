@@ -299,8 +299,6 @@ extern "C" AUTHNATIVE_API uint32_t Initialize() {
     a_ctx->lazer_local_path = get_current_process_dir();
     a_ctx->lazer_roaming_path = get_default_lazer_path();
 
-    std::wcout << a_ctx->lazer_local_path << std::endl;
-
     if (a_ctx->lazer_local_path.empty() || a_ctx->lazer_roaming_path.empty()) {
         // Couldn't get paths
         return 1;
@@ -448,6 +446,8 @@ extern "C" AUTHNATIVE_API void Sign(uint8_t *in_buf, const uint32_t in_len, uint
     const auto completed = to_upperhex(key_iv_enc) + to_upperhex(inner_enc) + footer + to_upperhex(footer_hmac) + "01";
 
     assert(out_len >= completed.size());
+
+    memset(out_buf, 0, out_len);
     std::memcpy(out_buf, completed.data(), completed.size());
 }
 
